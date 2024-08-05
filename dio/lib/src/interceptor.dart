@@ -41,10 +41,13 @@ abstract class _BaseHandler {
 
 /// The handler for interceptors to handle before the request has been sent.
 class RequestInterceptorHandler extends _BaseHandler {
+  RequestInterceptorHandler();
+
   /// Deliver the [requestOptions] to the next interceptor.
   ///
   /// Typically, the method should be called once interceptors done
   /// manipulating the [requestOptions].
+
   void next(RequestOptions requestOptions) {
     _throwIfCompleted();
     _completer.complete(InterceptorState<RequestOptions>(requestOptions));
@@ -186,6 +189,10 @@ class ErrorInterceptorHandler extends _BaseHandler {
     );
     _processNextInQueue?.call();
   }
+
+  RequestInterceptorHandler convertToRequest() {
+    return RequestInterceptorHandler();
+  }
 }
 
 /// [Interceptor] helps to deal with [RequestOptions], [Response],
@@ -228,6 +235,10 @@ class Interceptor {
   ) {
     handler.next(err);
   }
+
+  Future<bool?> onRefresh({required DioException error}) async {}
+
+  void customPrint(String? meassage) {}
 }
 
 /// The signature of [Interceptor.onRequest].
@@ -247,6 +258,8 @@ typedef InterceptorErrorCallback = void Function(
   DioException error,
   ErrorInterceptorHandler handler,
 );
+
+typedef InterceptorRefreshCallback = Future<bool> Function(DioException error);
 
 mixin _InterceptorWrapperMixin on Interceptor {
   InterceptorSendCallback? _onRequest;
@@ -455,4 +468,222 @@ class QueuedInterceptorsWrapper extends QueuedInterceptor
   @override
   InterceptorErrorCallback? get _onError => __onError;
   final InterceptorErrorCallback? __onError;
+}
+
+class CustomInterceptor extends Interceptor {
+  final _requestQueue = _TaskQueue<RequestOptions, RequestInterceptorHandler>();
+  final _retryQueue = _TaskQueue<RequestOptions, RequestInterceptorHandler>();
+  final _responseQueue = _TaskQueue<Response, ResponseInterceptorHandler>();
+  final _errorQueue = _TaskQueue<DioException, ErrorInterceptorHandler>();
+
+  bool _isRefreshing = false;
+
+  void _handleRequest(
+    RequestOptions options,
+    RequestInterceptorHandler handler,
+  ) {
+    _onPrint('FUCK REQUEST INTER');
+    _handleQueue(_requestQueue, options, handler, onRequest);
+  }
+
+  void _handleResponse(
+    Response<dynamic> response,
+    ResponseInterceptorHandler handler,
+  ) {
+    _onPrint('FUCK RESPONSE INTER');
+    _handleQueue(_responseQueue, response, handler, onResponse);
+  }
+
+  void _handleError(
+    DioException error,
+    ErrorInterceptorHandler handler,
+  ) {
+    _onPrint(
+      'FUCK _handleError ${error.response?.statusCode}  $_isRefreshing',
+    );
+    if (error.response?.statusCode == 401) {
+      final task =
+          _InterceptorParams<RequestOptions, RequestInterceptorHandler>(
+        error.requestOptions,
+        handler.convertToRequest(),
+      );
+
+      if (!_isRefreshing) {
+        _isRefreshing = true;
+
+        _retryQueue.queue.clear();
+        _retryQueue.queue.add(task);
+        _retryQueue.queue.addAll(_requestQueue.queue);
+        _requestQueue.queue.clear();
+        _onPrint('FUCK clear');
+        _refresh(error: error).then(
+          (value) {
+            _onPrint('FUCK THEN $value   ');
+            _isRefreshing = false;
+            if (value == true) {
+              _onPrint(
+                'FUCK TRY TO RETRY ${_retryQueue.queue.length}  ${error.requestOptions}',
+              );
+              _requestQueue.queue.addAll(_retryQueue.queue);
+              _retryQueue.queue.clear();
+              if (_requestQueue.queue.isNotEmpty) {
+                handler.reject(error);
+                _handleQueue<RequestOptions, RequestInterceptorHandler>(
+                  _requestQueue,
+                  error.requestOptions,
+                  handler.convertToRequest(),
+                  onRequest,
+                );
+              }
+            } else {
+              _onPrint('FUCK CLEAR RETRY');
+              _retryQueue.queue.clear();
+            }
+          },
+        );
+      } else {
+        _onPrint('FUCK add task _retry');
+        _retryQueue.queue.add(task);
+      }
+    } else {
+      _onPrint('FUCK else');
+      _handleQueue(_errorQueue, error, handler, onError);
+    }
+  }
+
+  Future<bool?> _refresh({required DioException error}) async {
+    return onRefresh(error: error);
+  }
+
+  void _onPrint(String? message) {
+    customPrint(message);
+  }
+
+  void _handleQueue<T, V extends _BaseHandler>(
+    _TaskQueue<T, V> taskQueue,
+    T data,
+    V handler,
+    void Function(T, V) callback,
+  ) {
+    final task = _InterceptorParams<T, V>(data, handler);
+    _onPrint('FUCK handler ${handler.runtimeType}');
+    task.handler._processNextInQueue = () {
+      if (taskQueue.queue.isNotEmpty) {
+        final next = taskQueue.queue.removeFirst();
+        assert(next.handler._processNextInQueue != null);
+        callback(next.data, next.handler);
+      } else {
+        taskQueue.processing = false;
+      }
+    };
+    taskQueue.queue.add(task);
+    _onPrint('FUCK handler2 ${taskQueue.processing}');
+    if (!taskQueue.processing) {
+      taskQueue.processing = true;
+      final task = taskQueue.queue.removeFirst();
+      try {
+        _onPrint('FUCK handler3');
+        callback(task.data, task.handler);
+      } catch (e) {
+        _onPrint('FUCK handler3 catch $e');
+        task.handler._processNextInQueue!();
+      }
+    }
+  }
+}
+
+mixin _CustomInterceptorWrapperMixin on Interceptor {
+  InterceptorSendCallback? _onRequest;
+  InterceptorSuccessCallback? _onResponse;
+  InterceptorErrorCallback? _onError;
+  InterceptorRefreshCallback? _onRefresh;
+  void Function(String? message)? _customPrint;
+
+  @override
+  void onRequest(
+    RequestOptions options,
+    RequestInterceptorHandler handler,
+  ) {
+    if (_onRequest != null) {
+      _onRequest!(options, handler);
+    } else {
+      handler.next(options);
+    }
+  }
+
+  @override
+  void onResponse(
+    Response<dynamic> response,
+    ResponseInterceptorHandler handler,
+  ) {
+    if (_onResponse != null) {
+      _onResponse!(response, handler);
+    } else {
+      handler.next(response);
+    }
+  }
+
+  @override
+  void onError(
+    DioException err,
+    ErrorInterceptorHandler handler,
+  ) {
+    if (_onError != null) {
+      _onError!(err, handler);
+    } else {
+      handler.next(err);
+    }
+  }
+
+  @override
+  Future<bool?> onRefresh({required DioException error}) async {
+    if (_onRefresh != null) {
+      return _onRefresh!(error);
+    }
+    return super.onRefresh(error: error);
+  }
+
+  @override
+  void customPrint(String? message) {
+    if (_customPrint != null) {
+      _customPrint!(message);
+    } else {
+      super.customPrint(message);
+    }
+  }
+}
+
+class CustomInterceptorsWrapper extends CustomInterceptor
+    with _CustomInterceptorWrapperMixin {
+  CustomInterceptorsWrapper({
+    InterceptorSendCallback? onRequest,
+    InterceptorSuccessCallback? onResponse,
+    InterceptorErrorCallback? onError,
+    InterceptorRefreshCallback? onRefresh,
+    void Function(String? message)? customPrint,
+  })  : __onRequest = onRequest,
+        __onResponse = onResponse,
+        __onError = onError,
+        __onRefresh = onRefresh,
+        __customPrint = customPrint;
+
+  @override
+  InterceptorSendCallback? get _onRequest => __onRequest;
+  final InterceptorSendCallback? __onRequest;
+
+  @override
+  InterceptorSuccessCallback? get _onResponse => __onResponse;
+  final InterceptorSuccessCallback? __onResponse;
+
+  @override
+  InterceptorErrorCallback? get _onError => __onError;
+  final InterceptorErrorCallback? __onError;
+
+  @override
+  InterceptorRefreshCallback? get _onRefresh => __onRefresh;
+  final InterceptorRefreshCallback? __onRefresh;
+
+  @override
+  void Function(String? message)? get _customPrint => __customPrint;
+  final void Function(String? message)? __customPrint;
 }

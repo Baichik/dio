@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:developer';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -467,7 +468,9 @@ abstract class DioMixin implements Dio {
     for (final interceptor in interceptors) {
       final fun = interceptor is QueuedInterceptor
           ? interceptor._handleRequest
-          : interceptor.onRequest;
+          : interceptor is CustomInterceptor
+              ? interceptor._handleRequest
+              : interceptor.onRequest;
       future = future.then(requestInterceptorWrapper(fun));
     }
 
@@ -491,7 +494,9 @@ abstract class DioMixin implements Dio {
     for (final interceptor in interceptors) {
       final fun = interceptor is QueuedInterceptor
           ? interceptor._handleResponse
-          : interceptor.onResponse;
+          : interceptor is CustomInterceptor
+              ? interceptor._handleResponse
+              : interceptor.onResponse;
       future = future.then(responseInterceptorWrapper(fun));
     }
 
@@ -499,7 +504,9 @@ abstract class DioMixin implements Dio {
     for (final interceptor in interceptors) {
       final fun = interceptor is QueuedInterceptor
           ? interceptor._handleError
-          : interceptor.onError;
+          : interceptor is CustomInterceptor
+              ? interceptor._handleError
+              : interceptor.onError;
       future = future.catchError(errorInterceptorWrapper(fun));
     }
     // Normalize errors, converts errors to [DioException].
@@ -728,6 +735,14 @@ abstract class DioMixin implements Dio {
     Object response,
     RequestOptions requestOptions,
   ) {
+    if (response is RequestOptions) {
+      return Response<T>(
+        requestOptions: requestOptions,
+        data: response.data == null
+            ? requestOptions.data as T?
+            : response.data as T?,
+      );
+    }
     if (response is! Response) {
       return Response<T>(
         data: response as T,
